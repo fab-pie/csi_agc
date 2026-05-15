@@ -23,7 +23,7 @@ from matplotlib.widgets import Button
 
 
 class CSIMonitor:
-    def __init__(self, port='COM16', baudrate=115200, buffer_size=100, csi_history_size=800):
+    def __init__(self, port='COM23', baudrate=115200, buffer_size=100, csi_history_size=800):
         self.port = port
         self.baudrate = baudrate
         self.buffer_size = buffer_size
@@ -486,7 +486,7 @@ def create_visualization(monitor):
 
 def main():
     parser = argparse.ArgumentParser(description='CSI Monitor - real-time visualization from ESP32')
-    parser.add_argument('-p', '--port', default='COM16', help='Serial port (default: COM16)')
+    parser.add_argument('-p', '--port', default='COM23', help='Serial port (default: COM23)')
     parser.add_argument('-b', '--baud', type=int, default=115200, help='Baud rate (default: 115200)')
     parser.add_argument('-s', '--size', type=int, default=100, help='Metric buffer size (default: 100)')
     parser.add_argument('--history', type=int, default=800, help='CSI frames shown in heatmap (default: 800)')

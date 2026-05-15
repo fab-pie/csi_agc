@@ -46,8 +46,9 @@ static void tx_task(void *pvParameter)
 
     int counter = 0;
     char payload[64];
-
     ESP_LOGI(TAG, "Starting transmission on port %d...", TX_PORT);
+
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
     while (1) {
         snprintf(payload, sizeof(payload), "TX_PKT_%d", counter++);
@@ -57,7 +58,11 @@ static void tx_task(void *pvParameter)
         } else {
             ESP_LOGI(TAG, "Sent: %s", payload);
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        /* Sleep until next 10ms slot (target 100Hz) */
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+
+        /* periodic 10ms sleep */
     }
 
     if (sock != -1) {
@@ -109,6 +114,6 @@ void app_main(void)
     xTaskCreate(tx_task, "tx_task", 4096, NULL, 5, NULL);
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
