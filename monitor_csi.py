@@ -11,6 +11,7 @@ Optional views are opened only when clicking the buttons in the main figure.
 
 import argparse
 import re
+import struct
 import sys
 from collections import deque
 from datetime import datetime
@@ -23,11 +24,12 @@ from matplotlib.widgets import Button
 
 
 class CSIMonitor:
-    def __init__(self, port='COM23', baudrate=115200, buffer_size=100, csi_history_size=800):
+    def __init__(self, port='COM23', baudrate=2000000, buffer_size=100, csi_history_size=800, plot_window=5.0):
         self.port = port
         self.baudrate = baudrate
         self.buffer_size = buffer_size
         self.csi_history_size = csi_history_size
+        self.plot_window = plot_window
 
         self.timestamps = deque(maxlen=buffer_size)
         self.rssi_values = deque(maxlen=buffer_size)
@@ -42,13 +44,19 @@ class CSIMonitor:
 
         self.csi_raw_db_history = deque(maxlen=csi_history_size)
         self.csi_corr_db_history = deque(maxlen=csi_history_size)
+        self.csi_time_history = deque(maxlen=csi_history_size)
 
         self.frame_count = 0
         self.start_time = datetime.now()
+        self.first_device_time_us = None
+        self.last_device_time_us = None
         self.last_meta = None
         self.last_csi_len = 0
         self.last_applied_comp = 0
         self.unparsed_csi_count = 0
+        self.serial_buffer = bytearray()
+        self.binary_header = struct.Struct('<4sBHQb6s')
+        self.binary_mode = False
 
         try:
             self.ser = serial.Serial(port, baudrate, timeout=0.05)
@@ -174,17 +182,39 @@ class CSIMonitor:
 
     def read_serial(self):
         try:
+            binary_frame = self.read_binary_frame()
+            if binary_frame:
+                self.record_meta(binary_frame['meta'])
+                self.record_csi_samples(binary_frame['samples'])
+                return binary_frame
+
             if not self.ser.in_waiting:
                 return None
 
-            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            data = self.ser.read(self.ser.in_waiting)
+            if not data:
+                return None
+
+            self.serial_buffer.extend(data)
+
+            binary_frame = self.read_binary_frame()
+            if binary_frame:
+                self.binary_mode = True
+                self.record_meta(binary_frame['meta'])
+                self.record_csi_samples(binary_frame['samples'])
+                return binary_frame
+
+            if self.binary_mode or b'CSIB' in self.serial_buffer:
+                self.binary_mode = True
+                return None
+
+            line = self.read_text_line()
             if not line:
                 return None
 
             csi_meta = self.parse_csi_meta(line)
             if csi_meta:
-                if self.last_meta is None:
-                    self.record_meta(csi_meta['meta'])
+                self.record_meta(csi_meta['meta'])
                 self.record_csi_samples(csi_meta['samples'])
                 return csi_meta
 
@@ -208,6 +238,60 @@ class CSIMonitor:
 
         return None
 
+    def read_binary_frame(self):
+        magic = b'CSIB'
+
+        while True:
+            start = self.serial_buffer.find(magic)
+            if start < 0:
+                if self.binary_mode and len(self.serial_buffer) > 3:
+                    del self.serial_buffer[:-3]
+                return None
+
+            if start > 0:
+                del self.serial_buffer[:start]
+
+            if len(self.serial_buffer) < self.binary_header.size:
+                return None
+
+            header = self.serial_buffer[:self.binary_header.size]
+            magic_value, version, csi_len, time_us, rssi, mac_bytes = self.binary_header.unpack(header)
+            if magic_value != magic or version != 1 or csi_len > 512:
+                del self.serial_buffer[0]
+                continue
+
+            frame_len = self.binary_header.size + csi_len
+            if len(self.serial_buffer) < frame_len:
+                return None
+
+            samples = list(self.serial_buffer[self.binary_header.size:frame_len])
+            del self.serial_buffer[:frame_len]
+
+            mac = ':'.join(f'{byte:02x}' for byte in mac_bytes)
+            return {
+                'meta': {
+                    'len': csi_len,
+                    'mac': mac,
+                    'rssi': rssi,
+                    'agc': 0,
+                    'fft': 0,
+                    'comp': 0,
+                    'time_us': time_us,
+                },
+                'samples': samples,
+            }
+
+    def read_text_line(self):
+        newline = self.serial_buffer.find(b'\n')
+        if newline < 0:
+            if len(self.serial_buffer) > 4096:
+                del self.serial_buffer[:-3]
+            return None
+
+        raw_line = bytes(self.serial_buffer[:newline + 1])
+        del self.serial_buffer[:newline + 1]
+        return raw_line.decode('utf-8', errors='ignore').strip()
+
     def record_meta(self, csi_data):
         self.frame_count += 1
         elapsed = (datetime.now() - self.start_time).total_seconds()
@@ -219,11 +303,23 @@ class CSIMonitor:
         self.compensation_gains.append(csi_data['comp'])
         self.last_meta = csi_data
 
-        print(
-            f"[{self.frame_count:4d}] RSSI:{csi_data['rssi']:4d} "
-            f"AGC:{csi_data['agc']:3d} FFT:{csi_data['fft']:4d} "
-            f"COMP:{csi_data['comp']:5d} MAC:{csi_data['mac']}"
-        )
+        if self.frame_count <= 3 or self.frame_count % 100 == 0:
+            rate = self.frame_count / max(elapsed, 1e-6)
+            device_rate = None
+            time_us = csi_data.get('time_us')
+            if time_us is not None:
+                if self.first_device_time_us is None:
+                    self.first_device_time_us = time_us
+                self.last_device_time_us = time_us
+                device_elapsed = (self.last_device_time_us - self.first_device_time_us) / 1_000_000.0
+                if device_elapsed > 0:
+                    device_rate = (self.frame_count - 1) / device_elapsed
+
+            device_text = f" dev:{device_rate:6.1f} Hz" if device_rate is not None else ""
+            print(
+                f"[{self.frame_count:5d}] py:{rate:6.1f} Hz{device_text} "
+                f"RSSI:{csi_data['rssi']:4d} MAC:{csi_data['mac']}"
+            )
 
     def record_csi_samples(self, csi_bytes):
         raw_subcarriers = self.bytes_to_iq_magnitude(csi_bytes)
@@ -245,6 +341,7 @@ class CSIMonitor:
         self.csi_corrected_db.append(corrected_db)
         self.csi_raw_db_history.append(raw_db)
         self.csi_corr_db_history.append(corrected_db)
+        self.csi_time_history.append(self.timestamps[-1] if self.timestamps else 0.0)
         self.last_csi_len = len(csi_bytes)
 
         if self.frame_count <= 3 or self.frame_count % 25 == 0:
@@ -303,6 +400,28 @@ def history_to_matrix(history):
     return matrix.T
 
 
+def windowed_histories(monitor):
+    times = list(monitor.csi_time_history)
+    raw_frames = list(monitor.csi_raw_db_history)
+    corr_frames = list(monitor.csi_corr_db_history)
+    if not times or not raw_frames or not corr_frames:
+        return [], [], []
+
+    latest = times[-1]
+    start_time = max(0.0, latest - monitor.plot_window)
+    selected = [
+        (time_value, raw_frame, corr_frame)
+        for time_value, raw_frame, corr_frame in zip(times, raw_frames, corr_frames)
+        if time_value >= start_time
+    ]
+    if not selected:
+        selected = [(times[-1], raw_frames[-1], corr_frames[-1])]
+
+    win_times, win_raw, win_corr = zip(*selected)
+    x = [time_value - win_times[-1] for time_value in win_times]
+    return list(x), list(win_raw), list(win_corr)
+
+
 def create_visualization(monitor):
     fig, (ax_raw, ax_corr) = plt.subplots(1, 2, figsize=(14, 7), sharey=True)
     fig.subplots_adjust(left=0.08, right=0.96, top=0.86, bottom=0.18, wspace=0.22)
@@ -321,10 +440,10 @@ def create_visualization(monitor):
         corr_lines.append(lc)
 
     ax_raw.set_title('CSI brute (sous-porteuses vs temps)', fontsize=14, fontweight='bold')
-    ax_raw.set_xlabel('Frames reçus')
+    ax_raw.set_xlabel('Temps (s)')
     ax_raw.set_ylabel('CSI amplitude (dB rel.)')
     ax_corr.set_title('CSI corrigee (sous-porteuses vs temps)', fontsize=14, fontweight='bold')
-    ax_corr.set_xlabel('Frames reçus')
+    ax_corr.set_xlabel('Temps (s)')
     ax_corr.set_ylabel('')
 
     status_text = fig.text(0.08, 0.92, 'Waiting for CSI...', fontsize=11)
@@ -424,13 +543,14 @@ def create_visualization(monitor):
 
     def animate(_frame):
         for _ in range(50):
-            had_data = monitor.ser.in_waiting > 0
+            had_data = monitor.ser.in_waiting > 0 or bool(monitor.serial_buffer)
             monitor.read_serial()
             if not had_data:
                 break
-        if len(monitor.csi_raw_db_history) > 1 and len(monitor.csi_corr_db_history) > 1:
-            raw = history_to_matrix(monitor.csi_raw_db_history)
-            corr = history_to_matrix(monitor.csi_corr_db_history)
+        x_window, raw_history, corr_history = windowed_histories(monitor)
+        if len(raw_history) > 1 and len(corr_history) > 1:
+            raw = history_to_matrix(raw_history)
+            corr = history_to_matrix(corr_history)
             frames = raw.shape[1]
             subcarriers = raw.shape[0]
 
@@ -441,7 +561,7 @@ def create_visualization(monitor):
                 start = 0
             indices = list(range(start, start + n_plot))
 
-            x = np.arange(frames)
+            x = np.array(x_window, dtype=np.float32)
             for line_idx, sc_idx in enumerate(indices):
                 y_raw = raw[sc_idx, :]
                 y_corr = corr[sc_idx, :]
@@ -451,13 +571,13 @@ def create_visualization(monitor):
             combined = np.concatenate([raw.ravel(), corr.ravel()])
             vmin, vmax = monitor.robust_limits(combined)
             for ax in (ax_raw, ax_corr):
-                ax.set_xlim(0, min(monitor.csi_history_size, max(20, frames)))
+                ax.set_xlim(-monitor.plot_window, 0)
                 ax.set_ylim(vmin, vmax)
 
             if monitor.last_meta:
                 status_text.set_text(
                     f"Frames: {monitor.frame_count} | CSI bytes: {monitor.last_csi_len} | "
-                    f"Subcarriers: {subcarriers} | RSSI: {monitor.last_meta['rssi']} dBm | "
+                    f"Fenetre: {monitor.plot_window:.1f}s | Subcarriers: {subcarriers} | RSSI: {monitor.last_meta['rssi']} dBm | "
                     f"AGC: {monitor.last_meta['agc']} | COMP: {monitor.last_meta['comp']} | "
                     f"applied: {monitor.last_applied_comp} dB"
                 )
@@ -487,9 +607,10 @@ def create_visualization(monitor):
 def main():
     parser = argparse.ArgumentParser(description='CSI Monitor - real-time visualization from ESP32')
     parser.add_argument('-p', '--port', default='COM23', help='Serial port (default: COM23)')
-    parser.add_argument('-b', '--baud', type=int, default=115200, help='Baud rate (default: 115200)')
+    parser.add_argument('-b', '--baud', type=int, default=2000000, help='Baud rate (default: 2000000)')
     parser.add_argument('-s', '--size', type=int, default=100, help='Metric buffer size (default: 100)')
     parser.add_argument('--history', type=int, default=800, help='CSI frames shown in heatmap (default: 800)')
+    parser.add_argument('--window', type=float, default=5.0, help='CSI plot time window in seconds (default: 5.0)')
     args = parser.parse_args()
 
     monitor = CSIMonitor(
@@ -497,12 +618,14 @@ def main():
         baudrate=args.baud,
         buffer_size=args.size,
         csi_history_size=args.history,
+        plot_window=args.window,
     )
 
     print("\n" + "=" * 60)
     print("ESP32 CSI Real-Time Monitor")
     print("=" * 60)
     print(f"Port: {args.port}, Baudrate: {args.baud}")
+    print(f"CSI plot window: {args.window:.1f} seconds")
     print("Main window shows only CSI raw/corrected heatmaps.")
     print("Use the Metriques and Trame buttons for optional plots.")
     print("Close the plot window to exit.")
