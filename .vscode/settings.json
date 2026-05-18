@@ -14,5 +14,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\fabie\\Gain_compensation\\build"
-  ]
+  ],
+  "idf.flashType": "UART"
 }

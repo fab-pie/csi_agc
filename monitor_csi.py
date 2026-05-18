@@ -50,6 +50,8 @@ class CSIMonitor:
         self.start_time = datetime.now()
         self.first_device_time_us = None
         self.last_device_time_us = None
+        self.rate_host_times = deque(maxlen=100)
+        self.rate_device_times = deque(maxlen=100)
         self.last_meta = None
         self.last_csi_len = 0
         self.last_applied_comp = 0
@@ -297,6 +299,7 @@ class CSIMonitor:
         elapsed = (datetime.now() - self.start_time).total_seconds()
 
         self.timestamps.append(elapsed)
+        self.rate_host_times.append(elapsed)
         self.rssi_values.append(csi_data['rssi'])
         self.agc_gains.append(csi_data['agc'])
         self.fft_gains.append(csi_data['fft'])
@@ -304,20 +307,28 @@ class CSIMonitor:
         self.last_meta = csi_data
 
         if self.frame_count <= 3 or self.frame_count % 100 == 0:
-            rate = self.frame_count / max(elapsed, 1e-6)
+            rate = None
+            if len(self.rate_host_times) > 1:
+                host_span = self.rate_host_times[-1] - self.rate_host_times[0]
+                if host_span > 0:
+                    rate = (len(self.rate_host_times) - 1) / host_span
+
             device_rate = None
             time_us = csi_data.get('time_us')
             if time_us is not None:
                 if self.first_device_time_us is None:
                     self.first_device_time_us = time_us
                 self.last_device_time_us = time_us
-                device_elapsed = (self.last_device_time_us - self.first_device_time_us) / 1_000_000.0
-                if device_elapsed > 0:
-                    device_rate = (self.frame_count - 1) / device_elapsed
+                self.rate_device_times.append(time_us / 1_000_000.0)
+                if len(self.rate_device_times) > 1:
+                    device_span = self.rate_device_times[-1] - self.rate_device_times[0]
+                    if device_span > 0:
+                        device_rate = (len(self.rate_device_times) - 1) / device_span
 
+            rate_text = f"{rate:6.1f}" if rate is not None else "   n/a"
             device_text = f" dev:{device_rate:6.1f} Hz" if device_rate is not None else ""
             print(
-                f"[{self.frame_count:5d}] py:{rate:6.1f} Hz{device_text} "
+                f"[{self.frame_count:5d}] py:{rate_text} Hz{device_text} "
                 f"RSSI:{csi_data['rssi']:4d} MAC:{csi_data['mac']}"
             )
 

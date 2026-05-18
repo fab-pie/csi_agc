@@ -20,11 +20,14 @@
 #define CSI_BINARY_SEND_MAX_LEN 256
 #define CSI_QUEUE_LEN 32
 #define UDP_RATE_LOG_ENABLED 0
+#define CSI_STATS_LOG_ENABLED 0
 
 static const char *TAG = "csi_rx";
 
 static bool wifi_connected = false;
 static QueueHandle_t csi_queue = NULL;
+static volatile uint32_t csi_cb_count = 0;
+static volatile uint32_t csi_drop_count = 0;
 
 typedef struct {
     uint16_t len;
@@ -100,6 +103,8 @@ static void wifi_csi_binary_rx_cb(void *ctx, wifi_csi_info_t *csi_info)
 {
     if (!csi_info || !csi_queue) return;
 
+    csi_cb_count++;
+
     csi_frame_t frame = {
         .len = csi_info->len > CSI_BINARY_SEND_MAX_LEN ? CSI_BINARY_SEND_MAX_LEN : csi_info->len,
         .rssi = csi_info->rx_ctrl.rssi,
@@ -108,13 +113,19 @@ static void wifi_csi_binary_rx_cb(void *ctx, wifi_csi_info_t *csi_info)
     memcpy(frame.mac, csi_info->mac, sizeof(frame.mac));
     memcpy(frame.data, csi_info->buf, frame.len);
 
-    xQueueSend(csi_queue, &frame, 0);
+    if (xQueueSend(csi_queue, &frame, 0) != pdTRUE) {
+        csi_drop_count++;
+    }
 }
 
 static void csi_serial_task(void *pvParameter)
 {
     csi_frame_t csi;
     uint8_t out[22 + CSI_BINARY_SEND_MAX_LEN];
+    uint32_t sent_count = 0;
+    uint32_t last_cb_count = 0;
+    uint32_t last_drop_count = 0;
+    int64_t last_report_us = esp_timer_get_time();
 
     while (1) {
         if (xQueueReceive(csi_queue, &csi, portMAX_DELAY) != pdTRUE) {
@@ -137,6 +148,26 @@ static void csi_serial_task(void *pvParameter)
 
         fwrite(out, 1, 22 + csi.len, stdout);
         fflush(stdout);
+        sent_count++;
+
+#if CSI_STATS_LOG_ENABLED
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - last_report_us >= 5000000) {
+            uint32_t cb_now = csi_cb_count;
+            uint32_t drop_now = csi_drop_count;
+            ESP_LOGI(TAG, "CSI stats 5s: cb=%lu sent=%lu drop=%lu",
+                     cb_now - last_cb_count, sent_count, drop_now - last_drop_count);
+            last_cb_count = cb_now;
+            last_drop_count = drop_now;
+            sent_count = 0;
+            last_report_us = now_us;
+        }
+#else
+        (void)sent_count;
+        (void)last_cb_count;
+        (void)last_drop_count;
+        (void)last_report_us;
+#endif
     }
 }
 
