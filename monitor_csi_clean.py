@@ -377,7 +377,7 @@ def create_plots(monitor, max_plot_points, db_padding=15):
 
 def main():
     parser = argparse.ArgumentParser(description="Clean CSI monitor for AMP:<seq>:... streams")
-    parser.add_argument("-p", "--port", default="COM23", help="Serial port")
+    parser.add_argument("-p", "--port", default="COM25", help="Serial port")
     parser.add_argument("-b", "--baud", type=int, default=2000000, help="Serial baudrate")
     parser.add_argument("--window", type=float, default=5.0, help="Display window in seconds")
     parser.add_argument("--target-hz", type=float, default=100.0, help="Expected CSI rate")

@@ -87,6 +87,14 @@ static void udp_listen_task(void *pvParameter)
         buf[len] = '\0';
         recv_count++;
 
+        if (strcmp(buf, "DISCOVER_CSI_RX") == 0) {
+            const char reply[] = "CSI_RX_HERE";
+            sendto(sock, reply, strlen(reply), 0, (struct sockaddr *)&source_addr, socklen);
+            ESP_LOGI(TAG, "Discovery reply sent to %s:%d",
+                     inet_ntoa(source_addr.sin_addr), ntohs(source_addr.sin_port));
+            continue;
+        }
+
 #if UDP_RATE_LOG_ENABLED
         int64_t now_us = esp_timer_get_time();
         if (now_us - last_report_us >= 1000000) {

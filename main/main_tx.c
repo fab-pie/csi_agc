@@ -15,13 +15,59 @@
 #define WIFI_SSID "DVIPro"
 #define WIFI_PASS "Jrd729kz"
 #define TX_PORT 12345
-/* Replace with the RX IP printed as "RX IP: ..." by main_rx.c.
- * Broadcast can be buffered/throttled by the AP and often lands below 100 Hz. */
-#define DEST_ADDR "192.168.8.211"
+#define DISCOVERY_ADDR "255.255.255.255"
+#define DISCOVERY_RETRIES 20
+#define DISCOVERY_TIMEOUT_MS 500
 
 static const char *TAG = "csi_tx";
 
 static bool wifi_connected = false;
+
+static bool discover_rx(int sock, struct sockaddr_in *dest_addr)
+{
+    int broadcast = 1;
+    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+
+    struct timeval timeout = {
+        .tv_sec = 0,
+        .tv_usec = DISCOVERY_TIMEOUT_MS * 1000,
+    };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_in discovery_addr = {
+        .sin_addr.s_addr = inet_addr(DISCOVERY_ADDR),
+        .sin_family = AF_INET,
+        .sin_port = htons(TX_PORT),
+    };
+
+    const char probe[] = "DISCOVER_CSI_RX";
+    char reply[32];
+
+    for (int attempt = 1; attempt <= DISCOVERY_RETRIES; attempt++) {
+        sendto(sock, probe, strlen(probe), 0,
+               (struct sockaddr *)&discovery_addr, sizeof(discovery_addr));
+
+        struct sockaddr_in source_addr;
+        socklen_t source_len = sizeof(source_addr);
+        int len = recvfrom(sock, reply, sizeof(reply) - 1, 0,
+                           (struct sockaddr *)&source_addr, &source_len);
+        if (len > 0) {
+            reply[len] = '\0';
+            if (strcmp(reply, "CSI_RX_HERE") == 0) {
+                dest_addr->sin_addr = source_addr.sin_addr;
+                dest_addr->sin_family = AF_INET;
+                dest_addr->sin_port = htons(TX_PORT);
+                ESP_LOGI(TAG, "Discovered RX at %s:%d",
+                         inet_ntoa(dest_addr->sin_addr), TX_PORT);
+                return true;
+            }
+        }
+
+        ESP_LOGW(TAG, "RX discovery attempt %d/%d failed", attempt, DISCOVERY_RETRIES);
+    }
+
+    return false;
+}
 
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
@@ -54,20 +100,18 @@ static void tx_task(void *pvParameter)
         return;
     }
 
-    struct sockaddr_in dest_addr;
-    dest_addr.sin_addr.s_addr = inet_addr(DEST_ADDR);
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(TX_PORT);
-    if (dest_addr.sin_addr.s_addr == INADDR_BROADCAST) {
-        int broadcast = 1;
-        setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    struct sockaddr_in dest_addr = {0};
+    while (!discover_rx(sock, &dest_addr)) {
+        ESP_LOGW(TAG, "RX not found, retrying discovery...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     int counter = 0;
     uint32_t sent_count = 0;
     int64_t last_report_us = esp_timer_get_time();
     char payload[64];
-    ESP_LOGI(TAG, "Starting transmission to %s:%d...", DEST_ADDR, TX_PORT);
+    ESP_LOGI(TAG, "Starting transmission to %s:%d...",
+             inet_ntoa(dest_addr.sin_addr), TX_PORT);
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
