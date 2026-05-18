@@ -55,9 +55,11 @@ class CSIMonitor:
         self.last_meta = None
         self.last_csi_len = 0
         self.last_applied_comp = 0
+        self.reference_rssi = None
         self.unparsed_csi_count = 0
         self.serial_buffer = bytearray()
-        self.binary_header = struct.Struct('<4sBHQb6s')
+        self.binary_header_v1 = struct.Struct('<4sBHQb6s')
+        self.binary_extra_v2 = struct.Struct('<Bbh')
         self.binary_mode = False
 
         try:
@@ -253,20 +255,30 @@ class CSIMonitor:
             if start > 0:
                 del self.serial_buffer[:start]
 
-            if len(self.serial_buffer) < self.binary_header.size:
+            if len(self.serial_buffer) < self.binary_header_v1.size:
                 return None
 
-            header = self.serial_buffer[:self.binary_header.size]
-            magic_value, version, csi_len, time_us, rssi, mac_bytes = self.binary_header.unpack(header)
-            if magic_value != magic or version != 1 or csi_len > 512:
+            header = self.serial_buffer[:self.binary_header_v1.size]
+            magic_value, version, csi_len, time_us, rssi, mac_bytes = self.binary_header_v1.unpack(header)
+            if magic_value != magic or version not in (1, 2) or csi_len > 512:
                 del self.serial_buffer[0]
                 continue
 
-            frame_len = self.binary_header.size + csi_len
+            extra_len = self.binary_extra_v2.size if version == 2 else 0
+            header_len = self.binary_header_v1.size + extra_len
+            frame_len = header_len + csi_len
             if len(self.serial_buffer) < frame_len:
                 return None
 
-            samples = list(self.serial_buffer[self.binary_header.size:frame_len])
+            agc = 0
+            fft = 0
+            comp = 0
+            if version == 2:
+                extra_start = self.binary_header_v1.size
+                extra_end = extra_start + self.binary_extra_v2.size
+                agc, fft, comp = self.binary_extra_v2.unpack(self.serial_buffer[extra_start:extra_end])
+
+            samples = list(self.serial_buffer[header_len:frame_len])
             del self.serial_buffer[:frame_len]
 
             mac = ':'.join(f'{byte:02x}' for byte in mac_bytes)
@@ -275,9 +287,9 @@ class CSIMonitor:
                     'len': csi_len,
                     'mac': mac,
                     'rssi': rssi,
-                    'agc': 0,
-                    'fft': 0,
-                    'comp': 0,
+                    'agc': agc,
+                    'fft': fft,
+                    'comp': comp,
                     'time_us': time_us,
                 },
                 'samples': samples,
@@ -301,6 +313,8 @@ class CSIMonitor:
         self.timestamps.append(elapsed)
         self.rate_host_times.append(elapsed)
         self.rssi_values.append(csi_data['rssi'])
+        if self.reference_rssi is None:
+            self.reference_rssi = csi_data['rssi']
         self.agc_gains.append(csi_data['agc'])
         self.fft_gains.append(csi_data['fft'])
         self.compensation_gains.append(csi_data['comp'])
@@ -339,9 +353,13 @@ class CSIMonitor:
 
         raw_db = self.to_db(raw_subcarriers)
 
-        # Compensation is handled in dB. If comp is positive, the receiver
-        # amplified the signal, so remove that gain from the displayed CSI.
+        # Prefer firmware-provided gain compensation. ESP-IDF builds without
+        # esp_csi_gain_ctrl_* fall back to RSSI-relative normalization.
         comp = self.compensation_gains[-1] if self.compensation_gains else 0
+        if comp == 0 and self.last_meta and self.reference_rssi is not None:
+            comp = self.last_meta['rssi'] - self.reference_rssi
+            if self.compensation_gains:
+                self.compensation_gains[-1] = comp
         self.last_applied_comp = comp
         corrected_db = raw_db - comp
         corrected_subcarriers = 10 ** (corrected_db / 20.0)
@@ -360,7 +378,7 @@ class CSIMonitor:
                 f"     CSI bytes:{len(csi_bytes):4d} subcarriers:{raw_subcarriers.size:3d} "
                 f"raw:{raw_db.min():6.1f}..{raw_db.max():6.1f} dB "
                 f"corr:{corrected_db.min():6.1f}..{corrected_db.max():6.1f} dB "
-                f"applied_comp:{comp:5d} dB"
+                f"applied_comp:{comp:5.1f} dB"
             )
 
     def close(self):
@@ -434,10 +452,10 @@ def windowed_histories(monitor):
 
 
 def create_visualization(monitor):
-    fig, (ax_raw, ax_corr) = plt.subplots(1, 2, figsize=(14, 7), sharey=True)
-    fig.subplots_adjust(left=0.08, right=0.96, top=0.86, bottom=0.18, wspace=0.22)
+    fig, (ax_raw, ax_corr) = plt.subplots(2, 1, figsize=(15, 10), sharex=True, sharey=True)
+    fig.subplots_adjust(left=0.08, right=0.97, top=0.88, bottom=0.13, hspace=0.22)
 
-    n_display = 64
+    n_display = 96
     raw_lines = []
     corr_lines = []
     cmap_raw = plt.cm.viridis
@@ -451,15 +469,15 @@ def create_visualization(monitor):
         corr_lines.append(lc)
 
     ax_raw.set_title('CSI brute (sous-porteuses vs temps)', fontsize=14, fontweight='bold')
-    ax_raw.set_xlabel('Temps (s)')
+    ax_raw.set_xlabel('')
     ax_raw.set_ylabel('CSI amplitude (dB rel.)')
     ax_corr.set_title('CSI corrigee (sous-porteuses vs temps)', fontsize=14, fontweight='bold')
     ax_corr.set_xlabel('Temps (s)')
-    ax_corr.set_ylabel('')
+    ax_corr.set_ylabel('CSI amplitude (dB rel.)')
 
     status_text = fig.text(0.08, 0.92, 'Waiting for CSI...', fontsize=11)
     subcarrier_text = fig.text(0.08, 0.885, 'Subcarriers affiches: attente CSI...', fontsize=10)
-    warning_text = fig.text(0.08, 0.08, '', fontsize=10, color='#9a3412')
+    warning_text = fig.text(0.08, 0.055, '', fontsize=10, color='#9a3412')
     fig.suptitle('ESP32 CSI - brute vs corrigee', fontsize=17, fontweight='bold')
 
     detail_state = {'fig': None}
@@ -621,7 +639,7 @@ def main():
     parser.add_argument('-b', '--baud', type=int, default=2000000, help='Baud rate (default: 2000000)')
     parser.add_argument('-s', '--size', type=int, default=100, help='Metric buffer size (default: 100)')
     parser.add_argument('--history', type=int, default=800, help='CSI frames shown in heatmap (default: 800)')
-    parser.add_argument('--window', type=float, default=5.0, help='CSI plot time window in seconds (default: 5.0)')
+    parser.add_argument('--window', type=float, default=10.0, help='CSI plot time window in seconds (default: 10.0)')
     args = parser.parse_args()
 
     monitor = CSIMonitor(

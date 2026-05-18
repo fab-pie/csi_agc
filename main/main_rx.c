@@ -32,6 +32,9 @@ static volatile uint32_t csi_drop_count = 0;
 typedef struct {
     uint16_t len;
     int8_t rssi;
+    uint8_t agc_gain;
+    int8_t fft_gain;
+    int16_t compensate_gain;
     uint64_t time_us;
     uint8_t mac[6];
     uint8_t data[CSI_BINARY_SEND_MAX_LEN];
@@ -110,6 +113,7 @@ static void wifi_csi_binary_rx_cb(void *ctx, wifi_csi_info_t *csi_info)
         .rssi = csi_info->rx_ctrl.rssi,
         .time_us = (uint64_t)esp_timer_get_time(),
     };
+
     memcpy(frame.mac, csi_info->mac, sizeof(frame.mac));
     memcpy(frame.data, csi_info->buf, frame.len);
 
@@ -121,7 +125,7 @@ static void wifi_csi_binary_rx_cb(void *ctx, wifi_csi_info_t *csi_info)
 static void csi_serial_task(void *pvParameter)
 {
     csi_frame_t csi;
-    uint8_t out[22 + CSI_BINARY_SEND_MAX_LEN];
+    uint8_t out[26 + CSI_BINARY_SEND_MAX_LEN];
     uint32_t sent_count = 0;
     uint32_t last_cb_count = 0;
     uint32_t last_drop_count = 0;
@@ -136,7 +140,7 @@ static void csi_serial_task(void *pvParameter)
         out[1] = 'S';
         out[2] = 'I';
         out[3] = 'B';
-        out[4] = 1;
+        out[4] = 2;
         out[5] = (uint8_t)(csi.len & 0xff);
         out[6] = (uint8_t)((csi.len >> 8) & 0xff);
         for (int i = 0; i < 8; i++) {
@@ -144,9 +148,13 @@ static void csi_serial_task(void *pvParameter)
         }
         out[15] = (uint8_t)csi.rssi;
         memcpy(&out[16], csi.mac, sizeof(csi.mac));
-        memcpy(&out[22], csi.data, csi.len);
+        out[22] = csi.agc_gain;
+        out[23] = (uint8_t)csi.fft_gain;
+        out[24] = (uint8_t)(csi.compensate_gain & 0xff);
+        out[25] = (uint8_t)((csi.compensate_gain >> 8) & 0xff);
+        memcpy(&out[26], csi.data, csi.len);
 
-        fwrite(out, 1, 22 + csi.len, stdout);
+        fwrite(out, 1, 26 + csi.len, stdout);
         fflush(stdout);
         sent_count++;
 
@@ -180,14 +188,15 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *csi_info)
     int8_t fft_gain = 0;
     int16_t compensate_gain = 0;
 
-    esp_err_t ret = esp_csi_gain_ctrl_get_rx_gain(&csi_info->rx_ctrl, &agc_gain, &fft_gain);
+    esp_err_t ret = ESP_ERR_NOT_SUPPORTED;
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "failed to get rx gain: %d", ret);
     }
 
-    esp_csi_gain_ctrl_record_rx_gain(agc_gain, fft_gain);
+    (void)agc_gain;
+    (void)fft_gain;
 
-    ret = esp_csi_gain_ctrl_get_gain_compensation(&compensate_gain, agc_gain, fft_gain);
+    ret = ESP_ERR_NOT_SUPPORTED;
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "failed to get compensation: %d", ret);
     }
@@ -297,7 +306,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to create CSI queue");
         return;
     }
-    xTaskCreate(csi_serial_task, "csi_serial", 4096, NULL, 6, NULL);
+    xTaskCreatePinnedToCore(csi_serial_task, "csi_serial", 4096, NULL, 6, NULL, 1);
 
     // Configure CSI after association
     wifi_csi_config_t csi_config = {
@@ -316,7 +325,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "CSI RX started on SSID: %s", WIFI_SSID);
 
-    xTaskCreate(udp_listen_task, "udp_listen", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(udp_listen_task, "udp_listen", 4096, NULL, 5, NULL, 0);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10));
