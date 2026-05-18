@@ -12,10 +12,12 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 
-#define WIFI_SSID "DVIPro1"
+#define WIFI_SSID "DVIPro"
 #define WIFI_PASS "Jrd729kz"
 #define TX_PORT 12345
-#define BROADCAST_ADDR "255.255.255.255"
+/* Replace with the RX IP printed as "RX IP: ..." by main_rx.c.
+ * Broadcast can be buffered/throttled by the AP and often lands below 100 Hz. */
+#define DEST_ADDR "192.168.8.211"
 
 static const char *TAG = "csi_tx";
 
@@ -40,6 +42,11 @@ static void event_handler(void* arg, esp_event_base_t event_base,
 
 static void tx_task(void *pvParameter)
 {
+    uint8_t sta_mac[6] = {0};
+    esp_wifi_get_mac(WIFI_IF_STA, sta_mac);
+    ESP_LOGI(TAG, "TX STA MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+             sta_mac[0], sta_mac[1], sta_mac[2], sta_mac[3], sta_mac[4], sta_mac[5]);
+
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
@@ -47,20 +54,20 @@ static void tx_task(void *pvParameter)
         return;
     }
 
-    // Enable broadcast
-    int broadcast = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
-
     struct sockaddr_in dest_addr;
-    dest_addr.sin_addr.s_addr = inet_addr(BROADCAST_ADDR);
+    dest_addr.sin_addr.s_addr = inet_addr(DEST_ADDR);
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(TX_PORT);
+    if (dest_addr.sin_addr.s_addr == INADDR_BROADCAST) {
+        int broadcast = 1;
+        setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+    }
 
     int counter = 0;
     uint32_t sent_count = 0;
     int64_t last_report_us = esp_timer_get_time();
     char payload[64];
-    ESP_LOGI(TAG, "Starting transmission on port %d...", TX_PORT);
+    ESP_LOGI(TAG, "Starting transmission to %s:%d...", DEST_ADDR, TX_PORT);
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 

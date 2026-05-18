@@ -1,0 +1,15 @@
+# Name,       Type, SubType,  Offset,    Size,     Flags
+# Hardware: Seeed XIAO ESP32-S3 - 8 MB Flash / 8 MB PSRAM
+# nvs_backup uses custom type 0x41 so ESP-IDF does not auto-init it.
+# fctry      read-only NVS copy (third recovery tier after nvs_backup).
+# reserved_* pre-declared slots for future use (avoid PT changes via OTA).
+# OTA partitions: 2 x ~3 MB (0x2F0000). Verify with `idf.py size` before flashing.
+nvs,        data, nvs,     0x9000,    0x6000,
+nvs_backup, data, 0x41,    0xF000,    0x2000,
+otadata,    data, ota,     0x11000,   0x2000,
+phy_init,   data, phy,     0x13000,   0x1000,
+ota_0,      app,  ota_0,   0x20000,   0x2F0000,
+ota_1,      app,  ota_1,   0x310000,  0x2F0000,
+fctry,      data, nvs,     0x600000,  0x6000,
+reserved_a, data, nvs,     0x606000,  0x40000,
+reserved_b, data, 0x50,    0x646000,  0x40000,

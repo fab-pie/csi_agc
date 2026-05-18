@@ -1,0 +1,13 @@
+# Critical settings for zoefall_tx - verified before each build.
+# If any key is missing or wrong in zoefall_tx/sdkconfig, the build is aborted.
+# To fix: dev > menuconfig zoefall_tx, then save and rebuild.
+
+# OTA rollback support - bootloader tracks PENDING_VERIFY state and rolls back
+# if the firmware is not marked valid by ota_tx_mark_valid().
+# IMPORTANT: this changes the bootloader binary -- requires USB reflash, not OTA.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# LWIP NAT - TX acts as a router between the upstream WiFi and the RX AP.
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+CONFIG_LWIP_IPV4_NAPT_PORTMAP=y

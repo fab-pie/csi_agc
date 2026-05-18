@@ -1,0 +1,37 @@
+menu "ZoeFall Common"
+
+config ZC_ZF_WIFI_AP_SSID
+    string "WiFi AP SSID (created by TX)"
+    default "ZoeFall7DA4"
+
+config ZC_ZF_WIFI_AP_PASSWORD
+    string "WiFi AP Password"
+    default "a9qgwZYn5ApgrgXxZD%q"
+
+config ZC_ZF_REPORT_STATUS_DELAY
+    int "Report status interval (seconds)"
+    default 60
+    range 1 3600
+
+endmenu
+
+menu "ZoeFall RX"
+
+config ZC_ZF_RX_TB_ACCESS_TOKEN
+    string "ThingsBoard Access Token (RX)"
+    default "8BmSjsT5YtNAYUPKW3Qv"
+
+config ZC_ZF_RX_SENSOR_ID
+    string "Supabase Sensor UUID (RX)"
+    default "db1ac831-6666-4f8c-bedd-65079eb249f8"
+
+config ZC_ZF_RX_SUPABASE_URL
+    string "Supabase project base URL (RX)"
+    default "https://api.zoe.care"
+
+config ZC_ZF_RX_OTA_SECRET_KEY
+    string "Sensor API key for Supabase Edge Functions (RX)"
+    default ""
+
+
+endmenu

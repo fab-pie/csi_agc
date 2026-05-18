@@ -1,0 +1,57 @@
+menu "ZoeFall Common"
+
+config ZC_ZF_SEND_REPORT_TASK_STACK_DEPTH
+    int "Send Report Task Stack Depth"
+    default 5000
+    range 1024 65535
+
+config ZC_ZF_REPORT_STATUS_TASK_STACK_DEPTH
+    int "Report Status Task Stack Depth"
+    default 5000
+    range 1024 65535
+
+config ZC_ZF_WIFI_AP_SSID
+    string "WiFi AP SSID (created by TX)"
+    default "ZoeFall6A68"
+
+config ZC_ZF_WIFI_AP_PASSWORD
+    string "WiFi AP Password"
+    default "a9qgwZYn5ApgrgXxZD%q"
+
+config ZC_ZF_WIFI_RECONNECT_DELAY
+    int "WiFi Reconnect Delay (seconds)"
+    default 30
+    range 1 300
+
+config ZC_ZF_REPORT_STATUS_DELAY
+    int "Report Status Delay (seconds)"
+    default 60
+    range 1 3600
+
+config ZC_ZF_CSI_RATE
+    int "Target CSI Rate (Hz)"
+    default 100
+    range 1 1000
+
+endmenu
+
+menu "ZoeFall TX"
+
+config ZC_ZF_TX_UDP_TASK_STACK_DEPTH
+    int "UDP Task Stack Depth"
+    default 3000
+    range 1024 65535
+
+config ZC_ZF_TX_TB_ACCESS_TOKEN
+    string "ThingsBoard Access Token (TX)"
+    default "yz29a24ldhytc10f9nys"
+
+config ZC_ZF_TX_UPSTREAM_SSID
+    string "Upstream WiFi SSID"
+    default "DVIPro"
+
+config ZC_ZF_TX_UPSTREAM_PASSWORD
+    string "Upstream WiFi Password"
+    default "Jrd729kz"
+
+endmenu

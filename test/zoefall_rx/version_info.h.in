@@ -1,0 +1,11 @@
+/* Auto-generated from version.json by CMake - do not edit manually.
+ * Regenerated on every cmake configure. To change the version, edit version.json. */
+#ifndef VERSION_INFO_H
+#define VERSION_INFO_H
+
+#define APP_VER_MAJOR @APP_VER_MAJOR@
+#define APP_VER_MINOR @APP_VER_MINOR@
+#define APP_VER_PATCH @APP_VER_PATCH@
+#define APP_VER_GIT_HASH "@APP_VER_GIT_HASH@"
+
+#endif // VERSION_INFO_H

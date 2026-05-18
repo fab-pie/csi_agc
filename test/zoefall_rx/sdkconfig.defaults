@@ -1,0 +1,26 @@
+# Critical settings for zoefall_rx - verified before each build.
+# If any key is missing or wrong in zoefall_rx/sdkconfig, the build is aborted.
+# To fix: dev > menuconfig zoefall_rx, then save and rebuild.
+
+# PSRAM (Octal, 80 MHz) - must always be active on the RX board.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_CLK_IO=30
+CONFIG_SPIRAM_CS_IO=26
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_SPEED=80
+CONFIG_SPIRAM_BOOT_HW_INIT=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MEMTEST=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND=y
+
+# Task Watchdog: panic on timeout + 30s window (~15x worst-case SVM inference ~2s).
+# 30s aligns RX with TX and gives margin for obtain_time() SNTP retries (up to 15s).
+# Requires USB reflash - changes bootloader config.
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
