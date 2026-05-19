@@ -12,17 +12,25 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "esp_csi_gain_ctrl.h"
 #include "nvs_flash.h"
 #include "lwip/sockets.h"
 
-#define WIFI_SSID "DVIPro"
-#define WIFI_PASS "Jrd729kz"
+#define TX_AP_SSID "CSI_TX_AP"
+#define TX_AP_PASS "csi123456"
+
+/* The RX uses its STA radio to connect to the TX AP for CSI.
+ * A second simultaneous upstream AP is not possible with this simple STA setup;
+ * send non-serial data through the TX AP network, or enable TX upstream APSTA. */
+#define WIFI_SSID TX_AP_SSID
+#define WIFI_PASS TX_AP_PASS
 #define RX_PORT 12345
 #define CSI_QUEUE_LEN 128
 #define CSI_AMP_MAX_SUBCARRIERS 128
 #define CSI_PRINT_SUBCARRIERS 64
 #define UDP_RATE_LOG_ENABLED 1
 #define CSI_RATE_LOG_ENABLED 1
+#define RX_GAIN_BASELINE_PACKETS 100
 
 static const char *TAG = "csi_rx";
 
@@ -38,6 +46,9 @@ typedef struct {
     uint16_t n_amp;
     uint32_t ts_us;
     int8_t rssi;
+    uint8_t agc_gain;
+    int8_t fft_gain;
+    float compensate_gain;
     int16_t amp[CSI_AMP_MAX_SUBCARRIERS];
 } csi_amp_frame_t;
 
@@ -118,11 +129,36 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
         return;
     }
 
+    const wifi_pkt_rx_ctrl_t* rx_ctrl = &info->rx_ctrl;
+    static int s_count = 0;
+    float compensate_gain = 1.0f;
+    static uint8_t agc_gain = 0;
+    static int8_t fft_gain = 0;
+    static uint8_t agc_gain_baseline = 0;
+    static int8_t fft_gain_baseline = 0;
+
+    esp_csi_gain_ctrl_get_rx_gain(rx_ctrl, &agc_gain, &fft_gain);
+    if (s_count < RX_GAIN_BASELINE_PACKETS) {
+        esp_csi_gain_ctrl_record_rx_gain(agc_gain, fft_gain);
+    } else if (s_count == RX_GAIN_BASELINE_PACKETS) {
+        esp_csi_gain_ctrl_get_rx_gain_baseline(&agc_gain_baseline, &fft_gain_baseline);
+        ESP_LOGI(TAG, "RX gain baseline: agc=%u fft=%d", agc_gain_baseline, fft_gain_baseline);
+    }
+
+    if (s_count >= RX_GAIN_BASELINE_PACKETS) {
+        esp_csi_gain_ctrl_get_gain_compensation(&compensate_gain, agc_gain, fft_gain);
+    }
+    s_count++;
+    (void)s_count;
+
     static uint16_t seq = 0;
     csi_amp_frame_t frame = {
         .seq = seq++,
-        .ts_us = (uint32_t)info->rx_ctrl.timestamp,
-        .rssi = info->rx_ctrl.rssi,
+        .ts_us = (uint32_t)rx_ctrl->timestamp,
+        .rssi = rx_ctrl->rssi,
+        .agc_gain = agc_gain,
+        .fft_gain = fft_gain,
+        .compensate_gain = compensate_gain,
     };
 
     int pairs = info->len / 2;
@@ -163,7 +199,8 @@ static void csi_uart_task(void *pvParameter)
             continue;
         }
 
-        printf("AMP:%u:%d", frame.seq, frame.amp[0]);
+        printf("AMP:%u:%u:%d:%.6f:%d",
+               frame.seq, frame.agc_gain, frame.fft_gain, frame.compensate_gain, frame.amp[0]);
         for (int i = 1; i < frame.n_amp; i++) {
             printf(",%d", frame.amp[i]);
         }

@@ -14,4 +14,13 @@ endif()
 message(STATUS "Building CSI ${TARGET_TYPE} - using ${MAIN_SRC}")
 
 idf_component_register(SRCS "${MAIN_SRC}"
-                    INCLUDE_DIRS ".")
+                    INCLUDE_DIRS "."
+                    PRIV_REQUIRES
+                        esp_csi_gain_ctrl
+                        esp_event
+                        esp_netif
+                        esp_timer
+                        esp_wifi
+                        log
+                        lwip
+                        nvs_flash)

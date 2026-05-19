@@ -3,6 +3,9 @@
 Clean CSI monitor for the ZoeFall RX AMP stream.
 
 Expected RX line format:
+    AMP:<seq>:<agc_gain>:<fft_gain>:<comp_gain>:a0,a1,...,a63
+
+Legacy RX line format is also accepted:
     AMP:<seq>:a0,a1,...,a63
 
 Windows shown:
@@ -11,7 +14,6 @@ Windows shown:
 """
 
 import argparse
-import re
 import sys
 import time
 from collections import deque
@@ -22,7 +24,7 @@ import serial
 from matplotlib.animation import FuncAnimation
 
 
-AMP_RE = re.compile(rb"AMP:(\d+):([0-9,\- ]+)")
+AMP_PREFIX = b"AMP:"
 
 
 class CleanCSIMonitor:
@@ -35,7 +37,11 @@ class CleanCSIMonitor:
         self.max_subcarriers = max_subcarriers
         self.print_every = print_every
 
+        self.raw_amp = deque(maxlen=self.max_frames)
         self.raw_db = deque(maxlen=self.max_frames)
+        self.agc_gains = deque(maxlen=self.max_frames)
+        self.fft_gains = deque(maxlen=self.max_frames)
+        self.agc_correction = deque(maxlen=self.max_frames)
         self.seq = deque(maxlen=self.max_frames)
         self.host_t = deque(maxlen=self.max_frames)
         self.rate_events = deque(maxlen=max(16, int(target_hz * 3)))
@@ -71,19 +77,37 @@ class CleanCSIMonitor:
 
     @staticmethod
     def parse_amp_line(line):
-        match = AMP_RE.search(line)
-        if not match:
+        start = line.find(AMP_PREFIX)
+        if start < 0:
             return None
+        parts = line[start + len(AMP_PREFIX):].split(b":", 4)
 
         try:
-            seq = int(match.group(1))
-            amps = [int(part) for part in match.group(2).split(b",") if part.strip()]
+            seq = int(parts[0])
+            if len(parts) == 5:
+                agc = int(parts[1])
+                fft = int(parts[2])
+                comp = float(parts[3])
+                amp_field = parts[4]
+            elif len(parts) == 3:
+                agc = 0
+                fft = 0
+                comp = float(parts[1])
+                amp_field = parts[2]
+            elif len(parts) == 2:
+                agc = 0
+                fft = 0
+                comp = 1.0
+                amp_field = parts[1]
+            else:
+                return None
+            amps = [int(part) for part in amp_field.split(b",") if part.strip()]
         except ValueError:
             return None
 
         if len(amps) < 8:
             return None
-        return seq, amps
+        return seq, agc, fft, comp, amps
 
     def read_available(self):
         if self.ser.in_waiting:
@@ -110,7 +134,8 @@ class CleanCSIMonitor:
                 self.bad_lines += 1
             return 0
 
-        seq, amps = parsed
+        seq, agc, fft, comp, amps = parsed
+        amp = np.asarray(amps, dtype=np.float32)
         db = self.amp_to_db(amps)
 
         if self.last_seq is not None:
@@ -123,7 +148,11 @@ class CleanCSIMonitor:
         self.last_seq = seq
 
         now = time.monotonic()
+        self.raw_amp.append(amp)
         self.raw_db.append(db)
+        self.agc_gains.append(agc)
+        self.fft_gains.append(fft)
+        self.agc_correction.append(comp)
         self.seq.append(seq)
         self.host_t.append(now)
         self.rate_events.append((now, seq))
@@ -165,7 +194,14 @@ class CleanCSIMonitor:
         latest = self.raw_db[-1] if self.raw_db else np.array([])
         finite = latest[np.isfinite(latest)]
         if finite.size:
-            limits = f"{finite.min():5.1f}..{finite.max():5.1f} dB"
+            agc = self.agc_gains[-1] if self.agc_gains else 0
+            fft = self.fft_gains[-1] if self.fft_gains else 0
+            comp = self.agc_correction[-1] if self.agc_correction else 1.0
+            comp_db = 20.0 * np.log10(comp) if comp > 0.0 else 0.0
+            limits = (
+                f"{finite.min():5.1f}..{finite.max():5.1f} dB "
+                f"agc:{agc} fft:{fft} corr:{comp:.4f}/{comp_db:+.2f}dB"
+            )
         else:
             limits = "no CSI"
         print(
@@ -176,15 +212,30 @@ class CleanCSIMonitor:
             print(f"     WARNING: seq rate is not close to {self.target_hz:.1f} Hz")
 
     def raw_matrix(self):
-        if not self.raw_db:
+        if not self.raw_amp:
             return np.empty((0, 0), dtype=np.float32)
 
-        rows = list(self.raw_db)
+        rows = list(self.raw_amp)
         max_len = max(len(row) for row in rows)
         mat = np.full((len(rows), max_len), np.nan, dtype=np.float32)
         for i, row in enumerate(rows):
             mat[i, :len(row)] = row
         return mat
+
+    def agc_correction_vector(self):
+        if not self.agc_correction:
+            return np.empty((0,), dtype=np.float32)
+        return np.asarray(list(self.agc_correction), dtype=np.float32)
+
+    def agc_vector(self):
+        if not self.agc_gains:
+            return np.empty((0,), dtype=np.int16)
+        return np.asarray(list(self.agc_gains), dtype=np.int16)
+
+    def fft_vector(self):
+        if not self.fft_gains:
+            return np.empty((0,), dtype=np.int16)
+        return np.asarray(list(self.fft_gains), dtype=np.int16)
 
 
 def robust_limits(data, padding=1.5):
@@ -197,20 +248,19 @@ def robust_limits(data, padding=1.5):
     return float(lo - padding), float(hi + padding)
 
 
-def gain_correct(raw):
-    if raw.size == 0:
-        return raw
+def apply_agc_correction(raw_amp, agc_correction):
+    if raw_amp.size == 0:
+        return raw_amp
 
-    corr = raw.copy()
-    frame_median = np.nanmedian(corr, axis=1, keepdims=True)
-    global_median = np.nanmedian(corr)
-    frame_median = np.where(np.isfinite(frame_median), frame_median, global_median)
-    if not np.isfinite(global_median):
-        global_median = 0.0
-    return corr - frame_median + global_median
+    comp = np.asarray(agc_correction, dtype=np.float32)
+    if comp.size < raw_amp.shape[0]:
+        comp = np.pad(comp, (raw_amp.shape[0] - comp.size, 0), constant_values=1.0)
+    comp = comp[-raw_amp.shape[0]:]
+    comp = np.where(np.isfinite(comp) & (comp > 0.0), comp, 1.0)
+    return raw_amp * comp.reshape(-1, 1)
 
 
-def pca_first_component(frames_by_subcarrier, detrend_window=101):
+def pca_first_component(frames_by_subcarrier):
     if frames_by_subcarrier.shape[0] < 2 or frames_by_subcarrier.shape[1] < 2:
         return np.zeros(frames_by_subcarrier.shape[0], dtype=np.float32)
 
@@ -218,19 +268,6 @@ def pca_first_component(frames_by_subcarrier, detrend_window=101):
     col_mean = np.nanmean(x, axis=0, keepdims=True)
     col_mean = np.where(np.isfinite(col_mean), col_mean, 0.0)
     x = np.where(np.isfinite(x), x, col_mean)
-
-    if detrend_window and x.shape[0] >= 5:
-        w = min(int(detrend_window), x.shape[0])
-        if w % 2 == 0:
-            w -= 1
-        if w >= 5:
-            kernel = np.ones(w, dtype=np.float32) / w
-            baseline = np.empty_like(x)
-            pad = w // 2
-            for col in range(x.shape[1]):
-                padded = np.pad(x[:, col], (pad, pad), mode="edge")
-                baseline[:, col] = np.convolve(padded, kernel, mode="valid")
-            x = x - baseline
 
     x -= np.mean(x, axis=0, keepdims=True)
     col_std = np.std(x, axis=0, keepdims=True)
@@ -295,13 +332,13 @@ def create_plots(monitor, max_plot_points, db_padding=15):
 
     ax_raw.set_title("CSI raw")
     ax_raw.set_ylabel("Amplitude (dB)")
-    ax_corr.set_title("CSI corrigee")
+    ax_corr.set_title("CSI brute * correction AGC")
     ax_corr.set_ylabel("Amplitude (dB)")
     ax_corr.set_xlabel("Number of packets")
 
     ax_pca_raw.set_title("PCA raw")
     ax_pca_raw.set_ylabel("PC1")
-    ax_pca_corr.set_title("PCA corrigee")
+    ax_pca_corr.set_title("PCA CSI * correction AGC")
     ax_pca_corr.set_ylabel("PC1")
     ax_pca_corr.set_xlabel("Number of packets")
 
@@ -313,18 +350,29 @@ def create_plots(monitor, max_plot_points, db_padding=15):
             if not monitor.read_available():
                 break
 
-        raw = monitor.raw_matrix()
-        if raw.shape[0] < 2:
+        raw_amp = monitor.raw_matrix()
+        if raw_amp.shape[0] < 2:
             return tuple(raw_lines + corr_lines + [pca_raw_line, pca_corr_line, status, subcarrier_text])
 
-        corr = gain_correct(raw)
-        frames, subcarriers = raw.shape
+        agc_corr = monitor.agc_correction_vector()
+        agc_values = monitor.agc_vector()
+        fft_values = monitor.fft_vector()
+        corrected_amp = apply_agc_correction(raw_amp, agc_corr)
+        raw = monitor.amp_to_db(raw_amp)
+        corr = monitor.amp_to_db(corrected_amp)
+        frames, subcarriers = raw_amp.shape
         if frames > max_plot_points:
             plot_raw = raw[-max_plot_points:]
             plot_corr = corr[-max_plot_points:]
+            plot_agc_corr = agc_corr[-max_plot_points:]
+            plot_agc = agc_values[-max_plot_points:]
+            plot_fft = fft_values[-max_plot_points:]
         else:
             plot_raw = raw
             plot_corr = corr
+            plot_agc_corr = agc_corr
+            plot_agc = agc_values
+            plot_fft = fft_values
         plot_frames = plot_raw.shape[0]
         indices = choose_subcarriers(subcarriers, monitor.max_subcarriers)
         x = np.arange(plot_frames, dtype=np.float32)
@@ -337,8 +385,8 @@ def create_plots(monitor, max_plot_points, db_padding=15):
         for line in corr_lines[len(indices):]:
             line.set_data([], [])
 
-        pca_raw = moving_average(pca_first_component(plot_raw[:, indices]))
-        pca_corr = moving_average(pca_first_component(plot_corr[:, indices]))
+        pca_raw = pca_first_component(plot_raw[:, indices])
+        pca_corr = pca_first_component(plot_corr[:, indices])
         pca_raw_line.set_data(x, pca_raw)
         pca_corr_line.set_data(x, pca_corr)
 
@@ -353,10 +401,15 @@ def create_plots(monitor, max_plot_points, db_padding=15):
         seq_rate = monitor.seq_rate_hz()
         py_text = f"{py_rate:.1f}" if py_rate is not None else "n/a"
         seq_text = f"{seq_rate:.1f}" if seq_rate is not None else "n/a"
+        latest_corr = plot_agc_corr[-1] if np.isfinite(plot_agc_corr[-1]) and plot_agc_corr[-1] > 0.0 else 1.0
+        latest_agc = int(plot_agc[-1]) if plot_agc.size else 0
+        latest_fft = int(plot_fft[-1]) if plot_fft.size else 0
         status.set_text(
             f"Frames: {monitor.total} | affichage: {frames} paquets | "
             f"py: {py_text} Hz | seq: {seq_text} Hz | "
-            f"drop: {monitor.dropped_seq} | reset: {monitor.seq_resets} | bad: {monitor.bad_lines}"
+            f"drop: {monitor.dropped_seq} | reset: {monitor.seq_resets} | bad: {monitor.bad_lines} | "
+            f"agc: {latest_agc} | fft: {latest_fft} | "
+            f"corr: {latest_corr:.4f} ({20.0 * np.log10(latest_corr):+.2f} dB)"
         )
         if seq_rate is not None and abs(seq_rate - monitor.target_hz) > monitor.target_hz * 0.15:
             status.set_color("#b91c1c")

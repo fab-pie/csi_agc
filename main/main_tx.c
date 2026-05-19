@@ -8,12 +8,22 @@
 #include "esp_event.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "esp_netif_ip_addr.h"
 #include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 
-#define WIFI_SSID "DVIPro"
-#define WIFI_PASS "Jrd729kz"
+#define TX_AP_SSID "CSI_TX_AP"
+#define TX_AP_PASS "csi123456"
+#define TX_AP_CHANNEL 6
+#define TX_AP_MAX_CONN 4
+
+/* Optional upstream Wi-Fi for later non-serial telemetry.
+ * Keep 0 for isolated line-of-sight CSI tests. */
+#define TX_ENABLE_UPSTREAM_STA 0
+#define UPSTREAM_WIFI_SSID "DVIPro"
+#define UPSTREAM_WIFI_PASS "Jrd729kz"
+
 #define TX_PORT 12345
 #define DISCOVERY_ADDR "255.255.255.255"
 #define DISCOVERY_RETRIES 20
@@ -72,26 +82,41 @@ static bool discover_rx(int sock, struct sockaddr_in *dest_addr)
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
 {
+#if TX_ENABLE_UPSTREAM_STA
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI(TAG, "WiFi STA started, connecting...");
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "WiFi disconnected, reconnecting...");
+        ESP_LOGW(TAG, "Upstream WiFi disconnected, reconnecting...");
         wifi_connected = false;
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Got IP: %s", ip4addr_ntoa(&event->ip_info.ip));
+        ESP_LOGI(TAG, "TX upstream IP: " IPSTR, IP2STR(&event->ip_info.ip));
         wifi_connected = true;
     }
+#else
+    (void)arg;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
+        ESP_LOGI(TAG, "Station connected: %02x:%02x:%02x:%02x:%02x:%02x aid=%d",
+                 event->mac[0], event->mac[1], event->mac[2],
+                 event->mac[3], event->mac[4], event->mac[5], event->aid);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
+        ESP_LOGW(TAG, "Station disconnected: %02x:%02x:%02x:%02x:%02x:%02x aid=%d",
+                 event->mac[0], event->mac[1], event->mac[2],
+                 event->mac[3], event->mac[4], event->mac[5], event->aid);
+    }
+#endif
 }
 
 static void tx_task(void *pvParameter)
 {
-    uint8_t sta_mac[6] = {0};
-    esp_wifi_get_mac(WIFI_IF_STA, sta_mac);
-    ESP_LOGI(TAG, "TX STA MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-             sta_mac[0], sta_mac[1], sta_mac[2], sta_mac[3], sta_mac[4], sta_mac[5]);
+    uint8_t ap_mac[6] = {0};
+    esp_wifi_get_mac(WIFI_IF_AP, ap_mac);
+    ESP_LOGI(TAG, "TX AP MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+             ap_mac[0], ap_mac[1], ap_mac[2], ap_mac[3], ap_mac[4], ap_mac[5]);
 
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
@@ -150,46 +175,68 @@ void app_main(void)
         ret = nvs_flash_init();
     }
 
-    esp_netif_init();
+    ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+#if TX_ENABLE_UPSTREAM_STA
     esp_netif_create_default_wifi_sta();
+#endif
+    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
+    esp_netif_ip_info_t ap_ip;
+    ESP_ERROR_CHECK(esp_netif_get_ip_info(ap_netif, &ap_ip));
+    ESP_LOGI(TAG, "TX AP IP: " IPSTR, IP2STR(&ap_ip.ip));
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_ip;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
                                                         ESP_EVENT_ANY_ID,
                                                         &event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
+                                                        NULL, NULL));
+#if TX_ENABLE_UPSTREAM_STA
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
                                                         IP_EVENT_STA_GOT_IP,
                                                         &event_handler,
-                                                        NULL,
-                                                        &instance_ip));
+                                                        NULL, NULL));
+#endif
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = "",
-            .password = "",
+    wifi_config_t ap_config = {
+        .ap = {
+            .ssid = TX_AP_SSID,
+            .password = TX_AP_PASS,
+            .ssid_len = strlen(TX_AP_SSID),
+            .channel = TX_AP_CHANNEL,
+            .max_connection = TX_AP_MAX_CONN,
+            .authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
-    strncpy((char*)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char*)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password) - 1);
+    if (strlen(TX_AP_PASS) == 0) {
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    }
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+#if TX_ENABLE_UPSTREAM_STA
+    wifi_config_t sta_config = {
+        .sta = {
+            .ssid = UPSTREAM_WIFI_SSID,
+            .password = UPSTREAM_WIFI_PASS,
+        },
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+#else
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+#endif
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    ESP_LOGI(TAG, "CSI TX STA started - connecting to SSID: %s", WIFI_SSID);
+    ESP_LOGI(TAG, "CSI TX AP started: ssid=%s channel=%d", TX_AP_SSID, TX_AP_CHANNEL);
 
-    /* wait until connected and got IP */
+#if TX_ENABLE_UPSTREAM_STA
+    ESP_LOGI(TAG, "TX upstream STA enabled: connecting to %s", UPSTREAM_WIFI_SSID);
     while (!wifi_connected) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
+#endif
 
     xTaskCreate(tx_task, "tx_task", 4096, NULL, 5, NULL);
 
