@@ -28,7 +28,7 @@ AMP_PREFIX = b"AMP:"
 
 
 class CleanCSIMonitor:
-    def __init__(self, port, baud, window_s, target_hz, max_subcarriers, print_every):
+    def __init__(self, port, baud, window_s, target_hz, max_subcarriers, print_every, agc_mode):
         self.port = port
         self.baud = baud
         self.window_s = window_s
@@ -36,12 +36,13 @@ class CleanCSIMonitor:
         self.max_frames = max(32, int(window_s * target_hz * 1.5))
         self.max_subcarriers = max_subcarriers
         self.print_every = print_every
+        self.agc_mode = agc_mode
 
         self.raw_amp = deque(maxlen=self.max_frames)
         self.raw_db = deque(maxlen=self.max_frames)
         self.agc_gains = deque(maxlen=self.max_frames)
         self.fft_gains = deque(maxlen=self.max_frames)
-        self.agc_correction = deque(maxlen=self.max_frames)
+        self.comp_gains = deque(maxlen=self.max_frames)
         self.seq = deque(maxlen=self.max_frames)
         self.host_t = deque(maxlen=self.max_frames)
         self.rate_events = deque(maxlen=max(16, int(target_hz * 3)))
@@ -152,7 +153,7 @@ class CleanCSIMonitor:
         self.raw_db.append(db)
         self.agc_gains.append(agc)
         self.fft_gains.append(fft)
-        self.agc_correction.append(comp)
+        self.comp_gains.append(comp)
         self.seq.append(seq)
         self.host_t.append(now)
         self.rate_events.append((now, seq))
@@ -196,7 +197,7 @@ class CleanCSIMonitor:
         if finite.size:
             agc = self.agc_gains[-1] if self.agc_gains else 0
             fft = self.fft_gains[-1] if self.fft_gains else 0
-            comp = self.agc_correction[-1] if self.agc_correction else 1.0
+            comp = self.comp_gains[-1] if self.comp_gains else 1.0
             comp_db = 20.0 * np.log10(comp) if comp > 0.0 else 0.0
             limits = (
                 f"{finite.min():5.1f}..{finite.max():5.1f} dB "
@@ -222,10 +223,10 @@ class CleanCSIMonitor:
             mat[i, :len(row)] = row
         return mat
 
-    def agc_correction_vector(self):
-        if not self.agc_correction:
+    def comp_gain_vector(self):
+        if not self.comp_gains:
             return np.empty((0,), dtype=np.float32)
-        return np.asarray(list(self.agc_correction), dtype=np.float32)
+        return np.asarray(list(self.comp_gains), dtype=np.float32)
 
     def agc_vector(self):
         if not self.agc_gains:
@@ -248,16 +249,26 @@ def robust_limits(data, padding=1.5):
     return float(lo - padding), float(hi + padding)
 
 
-def apply_agc_correction(raw_amp, agc_correction):
+def comp_gain_delta_db(comp_gain, mode):
+    comp = np.asarray(comp_gain, dtype=np.float32)
+    comp = np.where(np.isfinite(comp) & (comp > 0.0), comp, 1.0)
+    if mode == "multiply":
+        return 20.0 * np.log10(comp)
+    return np.zeros_like(comp, dtype=np.float32)
+
+
+def apply_comp_gain(raw_amp, comp_gain, mode):
     if raw_amp.size == 0:
         return raw_amp
 
-    comp = np.asarray(agc_correction, dtype=np.float32)
+    comp = np.asarray(comp_gain, dtype=np.float32)
     if comp.size < raw_amp.shape[0]:
         comp = np.pad(comp, (raw_amp.shape[0] - comp.size, 0), constant_values=1.0)
     comp = comp[-raw_amp.shape[0]:]
     comp = np.where(np.isfinite(comp) & (comp > 0.0), comp, 1.0)
-    return raw_amp * comp.reshape(-1, 1)
+    if mode == "multiply":
+        return raw_amp * comp.reshape(-1, 1)
+    return raw_amp
 
 
 def pca_first_component(frames_by_subcarrier):
@@ -332,13 +343,13 @@ def create_plots(monitor, max_plot_points, db_padding=15):
 
     ax_raw.set_title("CSI raw")
     ax_raw.set_ylabel("Amplitude (dB)")
-    ax_corr.set_title("CSI brute * correction AGC")
+    ax_corr.set_title(f"CSI brute {monitor.agc_mode} correction AGC")
     ax_corr.set_ylabel("Amplitude (dB)")
     ax_corr.set_xlabel("Number of packets")
 
     ax_pca_raw.set_title("PCA raw")
     ax_pca_raw.set_ylabel("PC1")
-    ax_pca_corr.set_title("PCA CSI * correction AGC")
+    ax_pca_corr.set_title(f"PCA CSI {monitor.agc_mode} correction AGC")
     ax_pca_corr.set_ylabel("PC1")
     ax_pca_corr.set_xlabel("Number of packets")
 
@@ -354,23 +365,23 @@ def create_plots(monitor, max_plot_points, db_padding=15):
         if raw_amp.shape[0] < 2:
             return tuple(raw_lines + corr_lines + [pca_raw_line, pca_corr_line, status, subcarrier_text])
 
-        agc_corr = monitor.agc_correction_vector()
+        comp_gain = monitor.comp_gain_vector()
         agc_values = monitor.agc_vector()
         fft_values = monitor.fft_vector()
-        corrected_amp = apply_agc_correction(raw_amp, agc_corr)
+        corrected_amp = apply_comp_gain(raw_amp, comp_gain, monitor.agc_mode)
         raw = monitor.amp_to_db(raw_amp)
         corr = monitor.amp_to_db(corrected_amp)
         frames, subcarriers = raw_amp.shape
         if frames > max_plot_points:
             plot_raw = raw[-max_plot_points:]
             plot_corr = corr[-max_plot_points:]
-            plot_agc_corr = agc_corr[-max_plot_points:]
+            plot_comp_gain = comp_gain[-max_plot_points:]
             plot_agc = agc_values[-max_plot_points:]
             plot_fft = fft_values[-max_plot_points:]
         else:
             plot_raw = raw
             plot_corr = corr
-            plot_agc_corr = agc_corr
+            plot_comp_gain = comp_gain
             plot_agc = agc_values
             plot_fft = fft_values
         plot_frames = plot_raw.shape[0]
@@ -392,8 +403,10 @@ def create_plots(monitor, max_plot_points, db_padding=15):
 
         for ax in (ax_raw, ax_corr, ax_pca_raw, ax_pca_corr):
             ax.set_xlim(0, max(1, plot_frames - 1))
-        ax_raw.set_ylim(*robust_limits(plot_raw[:, indices], padding=db_padding))
-        ax_corr.set_ylim(*robust_limits(plot_corr[:, indices], padding=db_padding))
+        csi_ylim = robust_limits(np.concatenate((plot_raw[:, indices], plot_corr[:, indices]), axis=0),
+                                 padding=db_padding)
+        ax_raw.set_ylim(*csi_ylim)
+        ax_corr.set_ylim(*csi_ylim)
         ax_pca_raw.set_ylim(*robust_limits(pca_raw, padding=0.25))
         ax_pca_corr.set_ylim(*robust_limits(pca_corr, padding=0.25))
 
@@ -401,15 +414,17 @@ def create_plots(monitor, max_plot_points, db_padding=15):
         seq_rate = monitor.seq_rate_hz()
         py_text = f"{py_rate:.1f}" if py_rate is not None else "n/a"
         seq_text = f"{seq_rate:.1f}" if seq_rate is not None else "n/a"
-        latest_corr = plot_agc_corr[-1] if np.isfinite(plot_agc_corr[-1]) and plot_agc_corr[-1] > 0.0 else 1.0
+        latest_comp = plot_comp_gain[-1] if np.isfinite(plot_comp_gain[-1]) and plot_comp_gain[-1] > 0.0 else 1.0
         latest_agc = int(plot_agc[-1]) if plot_agc.size else 0
         latest_fft = int(plot_fft[-1]) if plot_fft.size else 0
+        delta_db = comp_gain_delta_db(plot_comp_gain, monitor.agc_mode)
+        latest_delta = delta_db[-1] if delta_db.size else 0.0
         status.set_text(
             f"Frames: {monitor.total} | affichage: {frames} paquets | "
             f"py: {py_text} Hz | seq: {seq_text} Hz | "
             f"drop: {monitor.dropped_seq} | reset: {monitor.seq_resets} | bad: {monitor.bad_lines} | "
             f"agc: {latest_agc} | fft: {latest_fft} | "
-            f"corr: {latest_corr:.4f} ({20.0 * np.log10(latest_corr):+.2f} dB)"
+            f"comp: {latest_comp:.4f} | delta: {latest_delta:+.2f} dB | mode: {monitor.agc_mode}"
         )
         if seq_rate is not None and abs(seq_rate - monitor.target_hz) > monitor.target_hz * 0.15:
             status.set_color("#b91c1c")
@@ -438,6 +453,12 @@ def main():
     parser.add_argument("--max-plot-points", type=int, default=600, help="Max points drawn per line")
     parser.add_argument("--print-every", type=int, default=100, help="Print status every N frames")
     parser.add_argument("--db-padding", type=float, default=15, help="Padding (dB) added to computed y-limits for CSI plots")
+    parser.add_argument(
+        "--agc-mode",
+        choices=("multiply", "none"),
+        default="multiply",
+        help="How to apply the serial AGC correction factor to CSI amplitudes",
+    )
     args = parser.parse_args()
 
     monitor = CleanCSIMonitor(
@@ -447,6 +468,7 @@ def main():
         target_hz=args.target_hz,
         max_subcarriers=args.subcarriers,
         print_every=args.print_every,
+        agc_mode=args.agc_mode,
     )
 
     try:

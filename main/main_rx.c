@@ -299,7 +299,7 @@ void app_main(void)
         .lltf_en = 1,
         .htltf_en = 1,
         .stbc_htltf2_en = 1,
-        .ltf_merge_en = 1,
+        .ltf_merge_en = 0,
         .channel_filter_en = 1,
         .manu_scale = 0,
         .shift = 0,
