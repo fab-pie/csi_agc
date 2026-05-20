@@ -30,6 +30,7 @@
 #define CSI_PRINT_SUBCARRIERS 64
 #define UDP_RATE_LOG_ENABLED 1
 #define CSI_RATE_LOG_ENABLED 1
+#define CSI_FORMAT_LOG_ENABLED 1
 #define RX_GAIN_BASELINE_PACKETS 100
 
 static const char *TAG = "csi_rx";
@@ -40,6 +41,44 @@ static uint8_t ap_bssid[6] = {0};
 static bool ap_bssid_valid = false;
 static volatile uint32_t csi_cb_count = 0;
 static volatile uint32_t csi_drop_count = 0;
+
+#if CSI_FORMAT_LOG_ENABLED
+static void log_csi_format_if_changed(const wifi_pkt_rx_ctrl_t *rx_ctrl, int len)
+{
+    static bool have_last = false;
+    static int last_len = -1;
+    static unsigned last_sig_mode = 0;
+    static unsigned last_cwb = 0;
+    static unsigned last_channel = 0;
+    static unsigned last_secondary_channel = 0;
+    static uint32_t log_count = 0;
+
+    unsigned sig_mode = rx_ctrl->sig_mode;
+    unsigned cwb = rx_ctrl->cwb;
+    unsigned channel = rx_ctrl->channel;
+    unsigned secondary_channel = rx_ctrl->secondary_channel;
+    bool changed = !have_last ||
+        len != last_len ||
+        sig_mode != last_sig_mode ||
+        cwb != last_cwb ||
+        channel != last_channel ||
+        secondary_channel != last_secondary_channel;
+
+    if (changed || log_count < 10) {
+        ESP_LOGI(TAG,
+                 "CSI format: len=%d pairs=%d sig_mode=%u cwb=%u channel=%u secondary=%u",
+                 len, len / 2, sig_mode, cwb, channel, secondary_channel);
+        log_count++;
+    }
+
+    have_last = true;
+    last_len = len;
+    last_sig_mode = sig_mode;
+    last_cwb = cwb;
+    last_channel = channel;
+    last_secondary_channel = secondary_channel;
+}
+#endif
 
 typedef struct {
     uint16_t seq;
@@ -130,6 +169,9 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     }
 
     const wifi_pkt_rx_ctrl_t* rx_ctrl = &info->rx_ctrl;
+#if CSI_FORMAT_LOG_ENABLED
+    log_csi_format_if_changed(rx_ctrl, info->len);
+#endif
     static int s_count = 0;
     float compensate_gain = 1.0f;
     static uint8_t agc_gain = 0;
