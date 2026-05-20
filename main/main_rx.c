@@ -320,6 +320,8 @@ void app_main(void)
     };
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA,
+                                          WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G ));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
@@ -339,8 +341,8 @@ void app_main(void)
 
     wifi_csi_config_t csi_config = {
         .lltf_en = 1,
-        .htltf_en = 1,
-        .stbc_htltf2_en = 1,
+        .htltf_en = 0,
+        .stbc_htltf2_en = 0,
         .ltf_merge_en = 0,
         .channel_filter_en = 1,
         .manu_scale = 0,

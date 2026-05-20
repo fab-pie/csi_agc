@@ -393,6 +393,9 @@ void app_main(void)
 #else
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
 #endif
+        ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
+                                              WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G));
+        ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW20));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
