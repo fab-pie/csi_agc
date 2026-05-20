@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import serial
 from matplotlib.animation import FuncAnimation
+from matplotlib.widgets import Button, CheckButtons
 
 
 AMP_PREFIX = b"AMP:"
@@ -314,7 +315,7 @@ def choose_subcarriers(n_subcarriers, max_display):
 
 def create_plots(monitor, max_plot_points, db_padding=15):
     fig_csi, (ax_raw, ax_corr) = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
-    fig_csi.subplots_adjust(left=0.07, right=0.98, top=0.95, bottom=0.20, hspace=0.28)
+    fig_csi.subplots_adjust(left=0.07, right=0.98, top=0.91, bottom=0.20, hspace=0.28)
     fig_csi.suptitle("CSI raw / CSI corrigee", fontsize=15, fontweight="bold")
 
     fig_pca, (ax_pca_raw, ax_pca_corr) = plt.subplots(2, 1, figsize=(15, 7), sharex=True)
@@ -323,18 +324,29 @@ def create_plots(monitor, max_plot_points, db_padding=15):
 
     raw_lines = []
     corr_lines = []
-    colors = plt.cm.tab20(np.linspace(0, 1, monitor.max_subcarriers))
-    for i in range(monitor.max_subcarriers):
-        (raw_line,) = ax_raw.plot([], [], lw=0.75, alpha=0.85, color=colors[i])
-        (corr_line,) = ax_corr.plot([], [], lw=0.75, alpha=0.85, color=colors[i])
-        raw_lines.append(raw_line)
-        corr_lines.append(corr_line)
 
     (pca_raw_line,) = ax_pca_raw.plot([], [], color="#1f77b4", lw=1.8)
     (pca_corr_line,) = ax_pca_corr.plot([], [], color="#d62728", lw=1.8)
 
     status = fig_csi.text(0.07, 0.92, "Waiting for AMP frames...", fontsize=10)
     subcarrier_text = fig_csi.text(0.07, 0.895, "", fontsize=9)
+    paused_text = fig_csi.text(0.80, 0.92, "", fontsize=10, color="#b91c1c", fontweight="bold")
+
+    controls = {
+        "paused": False,
+        "selected": None,
+        "selector_fig": None,
+        "check_buttons": [],
+        "updating_checks": False,
+        "last_subcarrier_count": 0,
+    }
+
+    pause_ax = fig_csi.add_axes([0.07, 0.055, 0.09, 0.045])
+    select_ax = fig_csi.add_axes([0.18, 0.055, 0.16, 0.045])
+    all_ax = fig_csi.add_axes([0.36, 0.055, 0.13, 0.045])
+    pause_button = Button(pause_ax, "Pause")
+    select_button = Button(select_ax, "Sous-carrieres")
+    all_button = Button(all_ax, "Tout afficher")
 
     ax_raw.set_title("CSI raw")
     ax_raw.set_ylabel("Amplitude (dB)")
@@ -351,14 +363,139 @@ def create_plots(monitor, max_plot_points, db_padding=15):
     for ax in (ax_raw, ax_corr, ax_pca_raw, ax_pca_corr):
         ax.grid(True, alpha=0.25)
 
+    def set_pause(_event=None):
+        controls["paused"] = not controls["paused"]
+        pause_button.label.set_text("Reprendre" if controls["paused"] else "Pause")
+        paused_text.set_text("PAUSE" if controls["paused"] else "")
+        fig_csi.canvas.draw_idle()
+
+    def ensure_lines(n_lines):
+        if len(raw_lines) >= n_lines:
+            return
+        colors = plt.cm.tab20(np.linspace(0, 1, max(1, n_lines)))
+        for i in range(len(raw_lines), n_lines):
+            color = colors[i % len(colors)]
+            (raw_line,) = ax_raw.plot([], [], lw=0.75, alpha=0.85, color=color)
+            (corr_line,) = ax_corr.plot([], [], lw=0.75, alpha=0.85, color=color)
+            raw_lines.append(raw_line)
+            corr_lines.append(corr_line)
+
+    def active_subcarriers(n_subcarriers):
+        selected = controls["selected"]
+        if selected is None:
+            selected = set(choose_subcarriers(n_subcarriers, monitor.max_subcarriers))
+            controls["selected"] = selected
+        return sorted(sc for sc in selected if 0 <= sc < n_subcarriers)
+
+    def refresh_check_buttons():
+        if not controls["check_buttons"] or controls["selected"] is None:
+            return
+        controls["updating_checks"] = True
+        for checks in controls["check_buttons"]:
+            for i, label in enumerate(checks.labels):
+                sc = int(label.get_text())
+                wanted = sc in controls["selected"]
+                if checks.get_status()[i] != wanted:
+                    checks.set_active(i)
+        controls["updating_checks"] = False
+
+    def set_all_subcarriers(_event=None):
+        n_subcarriers = controls["last_subcarrier_count"]
+        if n_subcarriers <= 0:
+            return
+        controls["selected"] = set(range(n_subcarriers))
+        refresh_check_buttons()
+        fig_csi.canvas.draw_idle()
+
+    def open_selector(_event=None):
+        n_subcarriers = controls["last_subcarrier_count"]
+        if n_subcarriers <= 0:
+            return
+        if controls["selected"] is None:
+            controls["selected"] = set(choose_subcarriers(n_subcarriers, monitor.max_subcarriers))
+        if controls["selector_fig"] is not None and plt.fignum_exists(controls["selector_fig"].number):
+            controls["selector_fig"].canvas.manager.show()
+            controls["selector_fig"].canvas.draw_idle()
+            return
+
+        selector_fig = plt.figure(figsize=(8, 8))
+        selector_fig.suptitle("Sous-carrieres affichees", fontsize=13, fontweight="bold")
+        controls["selector_fig"] = selector_fig
+        controls["check_buttons"] = []
+
+        cols = 4 if n_subcarriers > 32 else 2
+        rows_per_col = int(np.ceil(n_subcarriers / cols))
+        for col in range(cols):
+            start = col * rows_per_col
+            stop = min(start + rows_per_col, n_subcarriers)
+            if start >= stop:
+                continue
+            labels = [str(i) for i in range(start, stop)]
+            actives = [i in controls["selected"] for i in range(start, stop)]
+            ax_checks = selector_fig.add_axes([
+                0.06 + col * (0.88 / cols),
+                0.16,
+                0.82 / cols,
+                0.74,
+            ])
+            checks = CheckButtons(ax_checks, labels, actives)
+
+            def on_check(label):
+                if controls["updating_checks"]:
+                    return
+                sc = int(label)
+                if sc in controls["selected"]:
+                    controls["selected"].remove(sc)
+                else:
+                    controls["selected"].add(sc)
+                fig_csi.canvas.draw_idle()
+
+            checks.on_clicked(on_check)
+            controls["check_buttons"].append(checks)
+
+        selector_all_ax = selector_fig.add_axes([0.18, 0.045, 0.18, 0.055])
+        selector_none_ax = selector_fig.add_axes([0.42, 0.045, 0.18, 0.055])
+        selector_default_ax = selector_fig.add_axes([0.66, 0.045, 0.18, 0.055])
+        selector_all = Button(selector_all_ax, "Tout")
+        selector_none = Button(selector_none_ax, "Aucun")
+        selector_default = Button(selector_default_ax, "Defaut")
+
+        def select_none(_button_event=None):
+            controls["selected"] = set()
+            refresh_check_buttons()
+            fig_csi.canvas.draw_idle()
+
+        def select_default(_button_event=None):
+            controls["selected"] = set(choose_subcarriers(n_subcarriers, monitor.max_subcarriers))
+            refresh_check_buttons()
+            fig_csi.canvas.draw_idle()
+
+        selector_all.on_clicked(set_all_subcarriers)
+        selector_none.on_clicked(select_none)
+        selector_default.on_clicked(select_default)
+        selector_fig._csi_selector_widgets = (
+            controls["check_buttons"],
+            selector_all,
+            selector_none,
+            selector_default,
+        )
+        selector_fig.show()
+
+    pause_button.on_clicked(set_pause)
+    select_button.on_clicked(open_selector)
+    all_button.on_clicked(set_all_subcarriers)
+
     def animate(_):
+        if controls["paused"]:
+            return tuple(raw_lines + corr_lines + [pca_raw_line, pca_corr_line, status, subcarrier_text, paused_text])
+
         for _i in range(20):
             if not monitor.read_available():
                 break
 
         raw_amp = monitor.raw_matrix()
         if raw_amp.shape[0] < 2:
-            return tuple(raw_lines + corr_lines + [pca_raw_line, pca_corr_line, status, subcarrier_text])
+            return tuple(raw_lines + corr_lines + [pca_raw_line, pca_corr_line, status, subcarrier_text, paused_text])
 
         comp_gain = monitor.comp_gain_vector()
         agc_values = monitor.agc_vector()
@@ -380,7 +517,9 @@ def create_plots(monitor, max_plot_points, db_padding=15):
             plot_agc = agc_values
             plot_fft = fft_values
         plot_frames = plot_raw.shape[0]
-        indices = choose_subcarriers(subcarriers, monitor.max_subcarriers)
+        controls["last_subcarrier_count"] = subcarriers
+        indices = active_subcarriers(subcarriers)
+        ensure_lines(len(indices))
         x = np.arange(plot_frames, dtype=np.float32)
 
         for line_i, sc_i in enumerate(indices):
@@ -391,15 +530,22 @@ def create_plots(monitor, max_plot_points, db_padding=15):
         for line in corr_lines[len(indices):]:
             line.set_data([], [])
 
-        pca_raw = pca_first_component(plot_raw[:, indices])
-        pca_corr = pca_first_component(plot_corr[:, indices])
+        if indices:
+            pca_raw = pca_first_component(plot_raw[:, indices])
+            pca_corr = pca_first_component(plot_corr[:, indices])
+        else:
+            pca_raw = np.zeros(plot_frames, dtype=np.float32)
+            pca_corr = np.zeros(plot_frames, dtype=np.float32)
         pca_raw_line.set_data(x, pca_raw)
         pca_corr_line.set_data(x, pca_corr)
 
         for ax in (ax_raw, ax_corr, ax_pca_raw, ax_pca_corr):
             ax.set_xlim(0, max(1, plot_frames - 1))
-        csi_ylim = robust_limits(np.concatenate((plot_raw[:, indices], plot_corr[:, indices]), axis=0),
-                                 padding=db_padding)
+        if indices:
+            csi_ylim = robust_limits(np.concatenate((plot_raw[:, indices], plot_corr[:, indices]), axis=0),
+                                     padding=db_padding)
+        else:
+            csi_ylim = (0.0, 1.0)
         ax_raw.set_ylim(*csi_ylim)
         ax_corr.set_ylim(*csi_ylim)
         ax_pca_raw.set_ylim(*robust_limits(pca_raw, padding=0.25))
@@ -425,15 +571,25 @@ def create_plots(monitor, max_plot_points, db_padding=15):
             status.set_color("#b91c1c")
         else:
             status.set_color("#111827")
-        subcarrier_text.set_text(
-            f"Subcarriers affichees: {indices[0]}..{indices[-1]} ({len(indices)}/{subcarriers})"
-        )
+        if indices:
+            if len(indices) == subcarriers:
+                selected_text = f"0..{subcarriers - 1}"
+            else:
+                selected_text = ", ".join(str(i) for i in indices[:18])
+                if len(indices) > 18:
+                    selected_text += ", ..."
+            subcarrier_text.set_text(
+                f"Subcarriers affichees: {selected_text} ({len(indices)}/{subcarriers})"
+            )
+        else:
+            subcarrier_text.set_text(f"Subcarriers affichees: aucune (0/{subcarriers})")
 
         fig_pca.canvas.draw_idle()
-        return tuple(raw_lines + corr_lines + [pca_raw_line, pca_corr_line, status, subcarrier_text])
+        return tuple(raw_lines + corr_lines + [pca_raw_line, pca_corr_line, status, subcarrier_text, paused_text])
 
     ani = FuncAnimation(fig_csi, animate, interval=50, blit=False, cache_frame_data=False)
     fig_csi._csi_animation = ani
+    fig_csi._csi_widgets = (pause_button, select_button, all_button)
     fig_pca._csi_animation = ani
     plt.show()
 
