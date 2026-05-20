@@ -1,19 +1,16 @@
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "nvs.h"
 #include "esp_event.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
 #include "esp_timer.h"
-#include "driver/usb_serial_jtag.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 
@@ -33,169 +30,9 @@
 #define DISCOVERY_RETRIES 20
 #define DISCOVERY_TIMEOUT_MS 500
 
-#define TX_POWER_MIN 8
-#define TX_POWER_MAX 80
-#define TX_POWER_INITIAL TX_POWER_MIN
-#define TX_POWER_SERIAL_BUF_LEN 8
-
 static const char *TAG = "csi_tx";
 
 static bool wifi_connected = false;
-static int8_t tx_power = TX_POWER_INITIAL;
-static bool usb_serial_ready = false;
-
-static int8_t tx_power_load_saved(void)
-{
-    nvs_handle_t handle;
-    int32_t saved_power = TX_POWER_INITIAL;
-
-    esp_err_t err = nvs_open("tx_cfg", NVS_READONLY, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGI(TAG, "No saved TX power, using default %d", TX_POWER_INITIAL);
-        return TX_POWER_INITIAL;
-    }
-
-    err = nvs_get_i32(handle, "power", &saved_power);
-    nvs_close(handle);
-
-    if (err != ESP_OK || saved_power < TX_POWER_MIN || saved_power > TX_POWER_MAX) {
-        ESP_LOGI(TAG, "Saved TX power unavailable/invalid, using default %d", TX_POWER_INITIAL);
-        return TX_POWER_INITIAL;
-    }
-
-    ESP_LOGI(TAG, "Loaded saved TX power: %ld", saved_power);
-    return (int8_t)saved_power;
-}
-
-static void tx_power_save(int8_t power)
-{
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("tx_cfg", NVS_READWRITE, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to open NVS for TX power: %s", esp_err_to_name(err));
-        return;
-    }
-
-    err = nvs_set_i32(handle, "power", power);
-    if (err == ESP_OK) {
-        err = nvs_commit(handle);
-    }
-    nvs_close(handle);
-
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to save TX power: %s", esp_err_to_name(err));
-    }
-}
-
-static void tx_power_send_confirmation(int8_t power)
-{
-    char line[24];
-    int len = snprintf(line, sizeof(line), "TX_POWER=%d\n", power);
-    if (len <= 0) {
-        return;
-    }
-
-    printf("%s", line);
-    if (usb_serial_ready) {
-        usb_serial_jtag_write_bytes(line, len, pdMS_TO_TICKS(100));
-    }
-}
-
-static void tx_power_apply_and_display(int8_t requested_power)
-{
-    int8_t applied_power = 0;
-    esp_err_t err = esp_wifi_set_max_tx_power(requested_power);
-    ESP_LOGW(TAG, "set max tx power %d: %s", requested_power, esp_err_to_name(err));
-
-    err = esp_wifi_get_max_tx_power(&applied_power);
-    ESP_LOGW(TAG, "get max tx power: %s", esp_err_to_name(err));
-    if (err == ESP_OK) {
-        tx_power = applied_power;
-        tx_power_save(tx_power);
-        ESP_LOGW(TAG, "TX power: %d", tx_power);
-        tx_power_send_confirmation(tx_power);
-    }
-}
-
-static void tx_power_usb_serial_init(void)
-{
-    usb_serial_jtag_driver_config_t usb_serial_config = {
-        .tx_buffer_size = 256,
-        .rx_buffer_size = 256,
-    };
-
-    esp_err_t err = usb_serial_jtag_driver_install(&usb_serial_config);
-    if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
-        usb_serial_ready = true;
-        ESP_LOGI(TAG, "USB Serial/JTAG TX power input ready");
-    } else {
-        usb_serial_ready = false;
-        ESP_LOGW(TAG, "USB Serial/JTAG init failed: %s", esp_err_to_name(err));
-    }
-}
-
-static void tx_power_serial_task(void *pvParameter)
-{
-    (void)pvParameter;
-
-    char input[TX_POWER_SERIAL_BUF_LEN];
-    size_t input_len = 0;
-
-    ESP_LOGI(TAG, "Serial TX power control ready. Type a value from %d to %d, then Enter.",
-             TX_POWER_MIN, TX_POWER_MAX);
-
-    while (1) {
-        uint8_t rx_char = 0;
-        int read_len = usb_serial_ready
-            ? usb_serial_jtag_read_bytes(&rx_char, 1, pdMS_TO_TICKS(20))
-            : 0;
-
-        if (read_len <= 0) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-
-        int ch = rx_char;
-        if (ch == '\r' || ch == '\n') {
-            if (input_len == 0) {
-                continue;
-            }
-
-            input[input_len] = '\0';
-            int requested_power = atoi(input);
-            input_len = 0;
-
-            if (requested_power < TX_POWER_MIN || requested_power > TX_POWER_MAX) {
-                ESP_LOGW(TAG, "Invalid TX power %d. Expected %d..%d",
-                         requested_power, TX_POWER_MIN, TX_POWER_MAX);
-                continue;
-            }
-
-            tx_power_apply_and_display((int8_t)requested_power);
-            continue;
-        }
-
-        if (ch == '\b' || ch == 127) {
-            if (input_len > 0) {
-                input_len--;
-            }
-            continue;
-        }
-
-        if (ch >= '0' && ch <= '9') {
-            if (input_len < sizeof(input) - 1) {
-                input[input_len++] = (char)ch;
-            } else {
-                input_len = 0;
-                ESP_LOGW(TAG, "Serial TX power input too long, clearing buffer");
-            }
-            continue;
-        }
-
-        input_len = 0;
-        ESP_LOGW(TAG, "Ignoring non-numeric serial input");
-    }
-}
 
 static bool discover_rx(int sock, struct sockaddr_in *dest_addr)
 {
@@ -338,9 +175,6 @@ void app_main(void)
         nvs_flash_erase();
         ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(ret);
-
-    tx_power = tx_power_load_saved();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -396,8 +230,10 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    tx_power_usb_serial_init();
-    tx_power_apply_and_display(tx_power);
+    int8_t power = 0;
+    ESP_LOGW(TAG, "set max tx power: %s", esp_err_to_name(esp_wifi_set_max_tx_power(80)));
+    ESP_LOGW(TAG, "get max tx power: %s", esp_err_to_name(esp_wifi_get_max_tx_power(&power)));
+    ESP_LOGW(TAG, "TX power: %d", power);
 
     ESP_LOGI(TAG, "CSI TX AP started: ssid=%s channel=%d", TX_AP_SSID, TX_AP_CHANNEL);
 
@@ -409,7 +245,6 @@ void app_main(void)
 #endif
 
     xTaskCreate(tx_task, "tx_task", 4096, NULL, 5, NULL);
-    xTaskCreate(tx_power_serial_task, "tx_power_serial", 3072, NULL, 5, NULL);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));

@@ -17,6 +17,7 @@ idf_component_register(SRCS "${MAIN_SRC}"
                     INCLUDE_DIRS "."
                     PRIV_REQUIRES
                         esp_csi_gain_ctrl
+                        driver
                         esp_event
                         esp_netif
                         esp_timer
