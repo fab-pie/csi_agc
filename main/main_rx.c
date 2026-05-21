@@ -66,8 +66,15 @@ static void log_csi_format_if_changed(const wifi_pkt_rx_ctrl_t *rx_ctrl, int len
 
     if (changed || log_count < 10) {
         ESP_LOGI(TAG,
-                 "CSI format: len=%d pairs=%d sig_mode=%u cwb=%u channel=%u secondary=%u",
-                 len, len / 2, sig_mode, cwb, channel, secondary_channel);
+                 "CSI format: len=%d pairs=%d sig_mode=%u(%s) cwb=%u(%s) channel=%u secondary=%u",
+                 len, len / 2,
+                 sig_mode, sig_mode == 0 ? "legacy/non-HT" : "HT/11n",
+                 cwb, cwb == 0 ? "20MHz" : "40MHz",
+                 channel, secondary_channel);
+        if (sig_mode != 0 || cwb != 0 || secondary_channel != 0) {
+            ESP_LOGW(TAG, "CSI is not pure legacy 20MHz: sig_mode=%u cwb=%u secondary=%u",
+                     sig_mode, cwb, secondary_channel);
+        }
         log_count++;
     }
 
@@ -95,6 +102,25 @@ static void check_esp_err(const char *what, esp_err_t err)
 {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "%s failed: %s", what, esp_err_to_name(err));
+    }
+}
+
+static void log_wifi_protocol(const char *if_name, wifi_interface_t ifx)
+{
+    uint8_t protocol = 0;
+    esp_err_t err = esp_wifi_get_protocol(ifx, &protocol);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_get_protocol(%s) failed: %s", if_name, esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "%s protocol mask: 0x%02x%s%s%s",
+             if_name, protocol,
+             (protocol & WIFI_PROTOCOL_11B) ? " 11b" : "",
+             (protocol & WIFI_PROTOCOL_11G) ? " 11g" : "",
+             (protocol & WIFI_PROTOCOL_11N) ? " 11n" : "");
+    if (protocol & WIFI_PROTOCOL_11N) {
+        ESP_LOGW(TAG, "%s still has 11n enabled", if_name);
     }
 }
 
@@ -322,6 +348,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA,
                                           WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G ));
+    log_wifi_protocol("STA", WIFI_IF_STA);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));

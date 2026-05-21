@@ -36,7 +36,7 @@
 #define TX_POWER_MIN 8
 #define TX_POWER_MAX 80
 #define TX_POWER_INITIAL TX_POWER_MIN
-#define TX_POWER_SERIAL_BUF_LEN 8
+#define TX_POWER_SERIAL_BUF_LEN 36
 
 static const char *TAG = "csi_tx";
 
@@ -115,6 +115,38 @@ static void tx_power_apply_and_display(int8_t requested_power)
         ESP_LOGW(TAG, "TX power: %d", tx_power);
         tx_power_send_confirmation(tx_power);
     }
+}
+
+static void log_wifi_protocol(const char *if_name, wifi_interface_t ifx)
+{
+    uint8_t protocol = 0;
+    esp_err_t err = esp_wifi_get_protocol(ifx, &protocol);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_get_protocol(%s) failed: %s", if_name, esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "%s protocol mask: 0x%02x%s%s%s",
+             if_name, protocol,
+             (protocol & WIFI_PROTOCOL_11B) ? " 11b" : "",
+             (protocol & WIFI_PROTOCOL_11G) ? " 11g" : "",
+             (protocol & WIFI_PROTOCOL_11N) ? " 11n" : "");
+    if (protocol & WIFI_PROTOCOL_11N) {
+        ESP_LOGW(TAG, "%s still has 11n enabled", if_name);
+    }
+}
+
+static void log_wifi_bandwidth(const char *if_name, wifi_interface_t ifx)
+{
+    wifi_bandwidth_t bandwidth = WIFI_BW_HT20;
+    esp_err_t err = esp_wifi_get_bandwidth(ifx, &bandwidth);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_get_bandwidth(%s) failed: %s", if_name, esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "%s bandwidth: %s", if_name,
+             bandwidth == WIFI_BW_HT40 ? "40MHz" : "20MHz");
 }
 
 static void tx_power_usb_serial_init(void)
@@ -395,7 +427,9 @@ void app_main(void)
 #endif
         ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP,
                                               WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G));
-        ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW20));
+        ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20));
+        log_wifi_protocol("AP", WIFI_IF_AP);
+        log_wifi_bandwidth("AP", WIFI_IF_AP);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
